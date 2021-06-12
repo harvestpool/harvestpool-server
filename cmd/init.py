@@ -13,6 +13,12 @@ from chia.util.config import (
 def init():
     config: Dict = load_config(DEFAULT_ROOT_PATH, "config.yaml")
 
+    if "pool_server" not in config:
+        config["pool_server"] = {}
+
+    if "pool_info" not in config["pool_server"]:
+        config["pool_server"]["pool_info"] = {}
+
     config["pool_server"]["pool_info"]["default_res"] = "Harvestpool.farm"
     config["pool_server"]["pool_info"]["name"] = "Harvestpool.farm"
     config["pool_server"]["pool_info"]["logo_url"] = "https://harvestpool.farm/img/Canada.png"
