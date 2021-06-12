@@ -6,6 +6,8 @@ from asyncio import Task
 from math import floor
 from typing import Dict, Optional, Set, List, Tuple
 
+import os, yaml
+
 from blspy import AugSchemeMPL, PrivateKey, G1Element
 from chia.pools.pool_wallet_info import PoolState, PoolSingletonState, POOL_PROTOCOL_VERSION
 from chia.protocols.pool_protocol import SubmitPartial
@@ -41,6 +43,16 @@ class Pool:
         self.log = logging
         # If you want to log to a file: use filename='example.log', encoding='utf-8'
         self.log.basicConfig(level=logging.INFO)
+        
+        # We load our configurations from here
+        with open(os.getcwd()+'/config.yaml') as f:
+            pool_config: Dict = yaml.safe_load(f)
+            
+        # Set our pool info here
+        self.info_default_res = pool_config["pool_info"]["default_res"];
+        self.info_name = pool_config["pool_info"]["name"];
+        self.info_logo_url = pool_config["pool_info"]["logo_url"];
+        self.info_description = pool_config["pool_info"]["description"];
 
         self.private_key = private_key
         self.public_key: G1Element = private_key.get_g1()
@@ -51,7 +63,7 @@ class Pool:
 
         self.store: Optional[PoolStore] = None
 
-        self.pool_fee = 0.01
+        self.pool_fee = pool_config["pool_fee"]
 
         # This number should be held constant and be consistent for every pool in the network. DO NOT CHANGE
         self.iters_limit = self.constants.POOL_SUB_SLOT_ITERS // 64
@@ -62,8 +74,8 @@ class Pool:
         # TODO(pool): potentially tweak these numbers for security and performance
         # This is what the user enters into the input field. This exact value will be stored on the blockchain
         self.pool_url = config["pool_server"]["pool_url"]  # "http://10.0.0.45"
-        self.min_difficulty = uint64(10)  # 10 difficulty is about 1 proof a day per plot
-        self.default_difficulty: uint64 = uint64(10)
+        self.min_difficulty = uint64(pool_config["min_difficulty"])  # 10 difficulty is about 1 proof a day per plot
+        self.default_difficulty: uint64 = uint64(pool_config["default_difficulty"])
 
         self.pending_point_partials: Optional[asyncio.Queue] = None
         self.recent_points_added: LRUCache = LRUCache(20000)
@@ -94,30 +106,30 @@ class Pool:
         # We need to check for slow farmers. If farmers cannot submit proofs in time, they won't be able to win
         # any rewards either. This number can be tweaked to be more or less strict. More strict ensures everyone
         # gets high rewards, but it might cause some of the slower farmers to not be able to participate in the pool.
-        self.partial_time_limit: int = 25
+        self.partial_time_limit: int = pool_config["partial_time_limit"]
 
         # There is always a risk of a reorg, in which case we cannot reward farmers that submitted partials in that
         # reorg. That is why we have a time delay before changing any account points.
-        self.partial_confirmation_delay: int = 30
+        self.partial_confirmation_delay: int = pool_config["partial_confirmation_delay"]
 
         # These are the phs that we want to look for on chain, that we can claim to our pool
         self.scan_p2_singleton_puzzle_hashes: Set[bytes32] = set()
 
         # Don't scan anything before this height, for efficiency (for example pool start date)
-        self.scan_start_height: uint32 = uint32(1000)
+        self.scan_start_height: uint32 = uint32(pool_config["scan_start_height"])
 
         # Interval for scanning and collecting the pool rewards
-        self.collect_pool_rewards_interval = 600
+        self.collect_pool_rewards_interval = pool_config["collect_pool_rewards_interval"]
 
         # After this many confirmations, a transaction is considered final and irreversible
-        self.confirmation_security_threshold = 6
+        self.confirmation_security_threshold = pool_config["confirmation_security_threshold"]
 
         # Interval for making payout transactions to farmers
-        self.payment_interval = 600
+        self.payment_interval = pool_config["payment_interval"]
 
         # We will not make transactions with more targets than this, to ensure our transaction gets into the blockchain
         # faster.
-        self.max_additions_per_transaction = 400
+        self.max_additions_per_transaction = pool_config["max_additions_per_transaction"]
 
         # This is the list of payments that we have not sent yet, to farmers
         self.pending_payments: Optional[asyncio.Queue] = None
@@ -129,7 +141,7 @@ class Pool:
         self.wallet_synced = False
 
         # We target these many partials for this number of seconds. We adjust after receiving this many partials.
-        self.number_of_partials_target: int = 30
+        self.number_of_partials_target: int = pool_config["number_of_partials_target"]
         self.time_target: int = 24 * 360
 
         # Tasks (infinite While loops) for different purposes
@@ -324,22 +336,12 @@ class Pool:
                     self.default_target_puzzle_hash, include_spent_coins=False
                 )
 
-                coins_to_distribute: List[Coin] = []
-                for coin_record in coin_records:
-                    assert not coin_record.spent
-                    if (
-                        coin_record.spent_block_index
-                        > self.blockchain_state["peak"].height - self.confirmation_security_threshold
-                    ):
-                        continue
-                    coins_to_distribute.append(coin_record.coin)
-
-                if len(coins_to_distribute) == 0:
+                if len(coin_records) == 0:
                     self.log.info("No funds to distribute.")
                     await asyncio.sleep(120)
                     continue
 
-                total_amount_claimed = sum([c.amount for c in coins_to_distribute])
+                total_amount_claimed = sum([c.coin.amount for c in coin_records])
                 pool_coin_amount = int(total_amount_claimed * self.pool_fee)
                 amount_to_distribute = total_amount_claimed - pool_coin_amount
 
@@ -378,7 +380,7 @@ class Pool:
                     else:
                         self.log.info(f"No points for any farmer. Waiting {self.payment_interval}")
 
-                await asyncio.sleep(60)
+                await asyncio.sleep(self.payment_interval)
             except asyncio.CancelledError:
                 self.log.info("Cancelled create_payments_loop, closing")
                 return
@@ -666,13 +668,12 @@ class Pool:
                 "error_message": f"The aggregate signature is invalid {partial.auth_key_and_partial_aggregate_signature}",
             }
 
-        if partial.payload.proof_of_space.pool_contract_puzzle_hash != launcher_id_to_p2_puzzle_hash(
-            partial.payload.launcher_id
-        ):
-            return {
-                "error_code": PoolErr.INVALID_P2_SINGLETON_PUZZLE_HASH.value,
-                "error_message": f"Invalid plot pool contract puzzle hash {partial.payload.proof_of_space.pool_contract_puzzle_hash}",
-            }
+        # TODO (chia-dev): Check DB p2_singleton_puzzle_hash and compare
+        # if partial.payload.proof_of_space.pool_contract_puzzle_hash != p2_singleton_puzzle_hash:
+        #     return {
+        #         "error_code": PoolErr.INVALID_P2_SINGLETON_PUZZLE_HASH.value,
+        #         "error_message": f"Invalid plot pool contract puzzle hash {partial.payload.proof_of_space.pool_contract_puzzle_hash}",
+        #     }
 
         if partial.payload.end_of_sub_slot:
             response = await self.node_rpc_client.get_recent_signage_point_or_eos(None, partial.payload.sp_hash)
