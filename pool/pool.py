@@ -6,7 +6,8 @@ from asyncio import Task
 from math import floor
 from typing import Dict, Optional, Set, List, Tuple
 
-import os, yaml
+import os
+import yaml
 
 from blspy import AugSchemeMPL, PrivateKey, G1Element
 from chia.pools.pool_wallet_info import PoolState, PoolSingletonState, POOL_PROTOCOL_VERSION
@@ -43,16 +44,12 @@ class Pool:
         self.log = logging
         # If you want to log to a file: use filename='example.log', encoding='utf-8'
         self.log.basicConfig(level=logging.INFO)
-        
-        # We load our configurations from here
-        with open(os.getcwd()+'/config.yaml') as f:
-            pool_config: Dict = yaml.safe_load(f)
-            
+
         # Set our pool info here
-        self.info_default_res = pool_config["pool_info"]["default_res"];
-        self.info_name = pool_config["pool_info"]["name"];
-        self.info_logo_url = pool_config["pool_info"]["logo_url"];
-        self.info_description = pool_config["pool_info"]["description"];
+        self.info_default_res = config["pool_server"]["pool_info"]["default_res"]
+        self.info_name = config["pool_server"]["pool_info"]["name"]
+        self.info_logo_url = config["pool_server"]["pool_info"]["logo_url"]
+        self.info_description = config["pool_server"]["pool_info"]["description"]
 
         self.private_key = private_key
         self.public_key: G1Element = private_key.get_g1()
@@ -63,7 +60,7 @@ class Pool:
 
         self.store: Optional[PoolStore] = None
 
-        self.pool_fee = pool_config["pool_fee"]
+        self.pool_fee = config["pool_server"]["pool_fee"]
 
         # This number should be held constant and be consistent for every pool in the network. DO NOT CHANGE
         self.iters_limit = self.constants.POOL_SUB_SLOT_ITERS // 64
@@ -74,8 +71,9 @@ class Pool:
         # TODO(pool): potentially tweak these numbers for security and performance
         # This is what the user enters into the input field. This exact value will be stored on the blockchain
         self.pool_url = config["pool_server"]["pool_url"]  # "http://10.0.0.45"
-        self.min_difficulty = uint64(pool_config["min_difficulty"])  # 10 difficulty is about 1 proof a day per plot
-        self.default_difficulty: uint64 = uint64(pool_config["default_difficulty"])
+        # 10 difficulty is about 1 proof a day per plot
+        self.min_difficulty = uint64(config["pool_server"]["min_difficulty"])
+        self.default_difficulty: uint64 = uint64(config["pool_server"]["default_difficulty"])
 
         self.pending_point_partials: Optional[asyncio.Queue] = None
         self.recent_points_added: LRUCache = LRUCache(20000)
@@ -106,30 +104,30 @@ class Pool:
         # We need to check for slow farmers. If farmers cannot submit proofs in time, they won't be able to win
         # any rewards either. This number can be tweaked to be more or less strict. More strict ensures everyone
         # gets high rewards, but it might cause some of the slower farmers to not be able to participate in the pool.
-        self.partial_time_limit: int = pool_config["partial_time_limit"]
+        self.partial_time_limit: int = config["pool_server"]["partial_time_limit"]
 
         # There is always a risk of a reorg, in which case we cannot reward farmers that submitted partials in that
         # reorg. That is why we have a time delay before changing any account points.
-        self.partial_confirmation_delay: int = pool_config["partial_confirmation_delay"]
+        self.partial_confirmation_delay: int = config["pool_server"]["partial_confirmation_delay"]
 
         # These are the phs that we want to look for on chain, that we can claim to our pool
         self.scan_p2_singleton_puzzle_hashes: Set[bytes32] = set()
 
         # Don't scan anything before this height, for efficiency (for example pool start date)
-        self.scan_start_height: uint32 = uint32(pool_config["scan_start_height"])
+        self.scan_start_height: uint32 = uint32(config["pool_server"]["scan_start_height"])
 
         # Interval for scanning and collecting the pool rewards
-        self.collect_pool_rewards_interval = pool_config["collect_pool_rewards_interval"]
+        self.collect_pool_rewards_interval = config["pool_server"]["collect_pool_rewards_interval"]
 
         # After this many confirmations, a transaction is considered final and irreversible
-        self.confirmation_security_threshold = pool_config["confirmation_security_threshold"]
+        self.confirmation_security_threshold = config["pool_server"]["confirmation_security_threshold"]
 
         # Interval for making payout transactions to farmers
-        self.payment_interval = pool_config["payment_interval"]
+        self.payment_interval = config["pool_server"]["payment_interval"]
 
         # We will not make transactions with more targets than this, to ensure our transaction gets into the blockchain
         # faster.
-        self.max_additions_per_transaction = pool_config["max_additions_per_transaction"]
+        self.max_additions_per_transaction = config["pool_server"]["max_additions_per_transaction"]
 
         # This is the list of payments that we have not sent yet, to farmers
         self.pending_payments: Optional[asyncio.Queue] = None
@@ -141,7 +139,7 @@ class Pool:
         self.wallet_synced = False
 
         # We target these many partials for this number of seconds. We adjust after receiving this many partials.
-        self.number_of_partials_target: int = pool_config["number_of_partials_target"]
+        self.number_of_partials_target: int = config["pool_server"]["number_of_partials_target"]
         self.time_target: int = 24 * 360
 
         # Tasks (infinite While loops) for different purposes
@@ -224,6 +222,7 @@ class Pool:
         while True:
             try:
                 if not self.blockchain_state["sync"]["synced"]:
+                    self.log.debug("Blockchain not synced, waiting 1 minute")
                     await asyncio.sleep(60)
                     continue
 
