@@ -4,7 +4,7 @@ import time
 import traceback
 from asyncio import Task
 from math import floor
-from typing import Dict, Optional, Set, List, Tuple
+from typing import Dict, Optional, Set, List, Tuple, Callable
 
 import os
 import yaml
@@ -42,6 +42,10 @@ class Pool:
     def __init__(self, private_key: PrivateKey, config: Dict, constants: ConsensusConstants):
         self.follow_singleton_tasks: Dict[bytes32, asyncio.Task] = {}
         self.log = logging
+
+        # event subscriptions
+        self.on_partial_submitted: Optional[Callable] = None
+
         # If you want to log to a file: use filename='example.log', encoding='utf-8'
         self.log.basicConfig(level=logging.INFO)
 
@@ -646,11 +650,21 @@ class Pool:
         current_difficulty: uint64,
         can_update_difficulty: bool,
     ) -> Dict:
+
+        async def make_response(partial: SubmitPartial, msg: Dict):
+            ''' We insert a middleware here to pass the result to the event handler, if any
+            '''
+            if self.on_partial_submitted is not None:
+                await self.on_partial_submitted(partial.to_json_dict(), msg)
+
+            # We don't need to wait for the event.  Pass through message.
+            return msg
+
         if partial.payload.suggested_difficulty < self.min_difficulty:
-            return {
+            return make_response(partial, {
                 "error_code": PoolErr.INVALID_DIFFICULTY.value,
                 "error_message": f"Invalid difficulty {partial.payload.suggested_difficulty}. minimum: {self.min_difficulty} ",
-            }
+            })
 
         # Validate signatures
         pk1: G1Element = partial.payload.owner_public_key
@@ -662,10 +676,10 @@ class Pool:
             [pk1, pk2, pk3], [m1, m2, m2], partial.auth_key_and_partial_aggregate_signature
         )
         if not valid_sig:
-            return {
+            return make_response(partial, {
                 "error_code": PoolErr.INVALID_SIGNATURE.value,
                 "error_message": f"The aggregate signature is invalid {partial.auth_key_and_partial_aggregate_signature}",
-            }
+            })
 
         # TODO (chia-dev): Check DB p2_singleton_puzzle_hash and compare
         # if partial.payload.proof_of_space.pool_contract_puzzle_hash != p2_singleton_puzzle_hash:
@@ -680,23 +694,23 @@ class Pool:
             response = await self.node_rpc_client.get_recent_signage_point_or_eos(partial.payload.sp_hash, None)
 
         if response is None or response["reverted"]:
-            return {
+            return make_response(partial, {
                 "error_code": PoolErr.NOT_FOUND.value,
                 "error_message": f"Did not find signage point or EOS {partial.payload.sp_hash}, {response}",
-            }
+            })
         node_time_received_sp = response["time_received"]
 
         signage_point: Optional[SignagePoint] = response.get("signage_point", None)
         end_of_sub_slot: Optional[EndOfSubSlotBundle] = response.get("eos", None)
 
         if time_received_partial - node_time_received_sp > self.partial_time_limit:
-            return {
+            return make_response(partial, {
                 "error_code": PoolErr.TOO_LATE.value,
                 "error_message": f"Received partial in {time_received_partial - node_time_received_sp}. "
                 f"Make sure your proof of space lookups are fast, and network connectivity is good. Response "
                 f"must happen in less than {self.partial_time_limit} seconds. NAS or networking farming can be an "
                 f"issue",
-            }
+            })
 
         # Validate the proof
         if signage_point is not None:
@@ -708,10 +722,10 @@ class Pool:
             self.constants, challenge_hash, partial.payload.sp_hash
         )
         if quality_string is None:
-            return {
+            return make_response(partial, {
                 "error_code": PoolErr.INVALID_PROOF.value,
                 "error_message": f"Invalid proof of space {partial.payload.sp_hash}",
-            }
+            })
 
         required_iters: uint64 = calculate_iterations_quality(
             self.constants.DIFFICULTY_CONSTANT_FACTOR,
@@ -722,12 +736,12 @@ class Pool:
         )
 
         if required_iters >= self.iters_limit:
-            return {
+            return make_response(partial, {
                 "error_code": PoolErr.PROOF_NOT_GOOD_ENOUGH.value,
                 "error_message": f"Proof of space has required iters {required_iters}, too high for difficulty "
                 f"{current_difficulty}",
                 "current_difficulty": current_difficulty,
-            }
+            })
 
         await self.pending_point_partials.put((partial, time_received_partial, current_difficulty))
 
@@ -758,6 +772,6 @@ class Pool:
                         <= partial.payload.authentication_key_info.authentication_public_key_timestamp
                     ):
                         await self.store.update_difficulty(partial.payload.launcher_id, new_difficulty)
-                        return {"points_balance": balance, "current_difficulty": new_difficulty}
+                        return make_response(partial, {"points_balance": balance, "current_difficulty": new_difficulty})
 
-        return {"points_balance": balance, "current_difficulty": current_difficulty}
+        return make_response(partial, {"points_balance": balance, "current_difficulty": current_difficulty})

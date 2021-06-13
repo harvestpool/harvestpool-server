@@ -21,6 +21,8 @@ from error_codes import PoolErr
 from store import FarmerRecord
 from pool import Pool
 
+from harvestpool import HarvestpoolClient
+
 
 def allow_cors(response: web.Response) -> web.Response:
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -32,6 +34,11 @@ class PoolServer:
 
         self.log = logging.getLogger(__name__)
         self.pool = Pool(private_key, config, constants)
+
+        self.client = HarvestpoolClient()
+
+        # hool up harvestpool to our event listener
+        self.pool.on_partial_submitted = self.client.handle_partial_submitted
 
     async def start(self):
         await self.pool.start()
